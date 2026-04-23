@@ -1,0 +1,14 @@
+# Videos
+*.asf
+*.mp4
+*.avi
+
+# Dataset
+dataset/
+
+# Models
+*.pt
+
+# Python
+__pycache__/
+*.pyc
