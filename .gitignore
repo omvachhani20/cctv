@@ -2,6 +2,8 @@
 *.asf
 *.mp4
 *.avi
+*.MOV
+*.mov
 
 # Dataset
 dataset/
