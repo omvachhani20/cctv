@@ -17,7 +17,7 @@ def parse_args():
     )
     parser.add_argument(
         "--source",
-        default="NVR 1_ch5_20250613095500_20250613095818.asf",
+        default="IMG_7654.MOV",
         help="Video path or camera index (default: sample CCTV file).",
     )
     parser.add_argument(
