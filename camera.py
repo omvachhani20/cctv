@@ -3,10 +3,17 @@ import os
 import time
 from pathlib import Path
 
-import cv2
+import cv2  # type: ignore
 from ultralytics import YOLO
 import torch
 
+# Initialize global variables
+id_mapping = {}
+next_person_id = 1
+track_frames = {}
+previous_positions = {}
+saved_images = set()
+line_y = 0
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -17,7 +24,7 @@ def parse_args():
     )
     parser.add_argument(
         "--source",
-        default="IMG_7654.MOV",
+        default="NVR 1_ch5_20250613095500_20250613095818.asf",
         help="Video path or camera index (default: sample CCTV file).",
     )
     parser.add_argument(
@@ -66,20 +73,21 @@ def ensure_dir(path):
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
-id_mapping = {}
-next_person_id = 1
-
-track_frames = {}   # track how long person is visible
-MIN_FRAMES = 10
-previous_positions = {}
-DISTANCE_THRESHOLD = 100
-
-track_history = {}
-line_y = 0   # will set later
+# Global variables will be initialized in main()
 
 def main():
-    global id_mapping, next_person_id
-    args = parse_args()
+    global id_mapping, next_person_id, track_frames, previous_positions, saved_images, line_y
+    
+    args = parse_args()  
+    
+    track_frames.clear()
+    previous_positions.clear()
+    id_mapping.clear()
+    saved_images.clear()
+    next_person_id = 1
+    MIN_FRAMES = 10
+    track_history = {}
+    
     ensure_dir(args.save_dir)
     ensure_dir("videos")
 
@@ -89,7 +97,6 @@ def main():
 
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    global line_y
     line_y = height // 2
 
     # ── FPS: clamp bad values common in CCTV/NVR .asf files ──────────────────
@@ -166,73 +173,78 @@ def main():
             xyxy  = boxes.xyxy.cpu().tolist()
 
             for track_id, box in zip(ids, xyxy):
-                 x1, y1, x2, y2 = map(int, box)
-                 tid = int(track_id)
+                x1, y1, x2, y2 = map(int, box)
+                tid = int(track_id)
 
-                 width_box = x2 - x1
-                 height_box = y2 - y1
-                 area = width_box * height_box
+                width_box = x2 - x1
+                height_box = y2 - y1
+                area = width_box * height_box
 
                 # 🔹 FILTER SMALL OBJECTS
-                 if area < 7000:
-                     continue
-                 if width_box < 40 or height_box < 80:
-                     continue
+                if area < 7000:
+                    continue
+                if width_box < 40 or height_box < 80:
+                    continue
 
-                 aspect_ratio = height_box / (width_box + 1)
-                 if aspect_ratio < 1.2:
-                     continue
+                aspect_ratio = height_box / (width_box + 1)
+                if aspect_ratio < 1.2:
+                    continue
 
-                 last_seen[tid] = 0
+                last_seen[tid] = 0
 
-                 # 🔹 TRACK STABILITY
-                 track_frames[tid] = track_frames.get(tid, 0) + 1
-                 if track_frames[tid] < MIN_FRAMES:
-                     continue
+                # 🔹 TRACK STABILITY
+                track_frames[tid] = track_frames.get(tid, 0) + 1
+                if track_frames[tid] < MIN_FRAMES:
+                    continue
 
-                 center_x = (x1 + x2) // 2
-                 center_y = (y1 + y2) // 2
+                center_x = (x1 + x2) // 2
+                center_y = (y1 + y2) // 2
 
-                 previous_positions[tid] = (center_x, center_y)
+                previous_positions[tid] = (center_x, center_y)
 
-                # store history# store history
-                 track_history.setdefault(tid, [])
-                 track_history[tid].append(center_y)
+                # store history
+                track_history.setdefault(tid, [])
+                track_history[tid].append(center_y)
 
-                 if len(track_history[tid]) > 5:
-                     track_history[tid].pop(0)
+                if len(track_history[tid]) > 5:
+                    track_history[tid].pop(0)
 
                 # Step 1: Assign ID (only once)
-                 if tid not in id_mapping:
-                     id_mapping[tid] = next_person_id
-                     next_person_id += 1
- 
-                 real_id = id_mapping[tid]
- 
-                 # Count person once when stable
-                 if real_id not in counted_ids:
-                     counted_ids.add(real_id)
-                     unique_ids.add(real_id)
+                if tid not in id_mapping:
+                    id_mapping[tid] = next_person_id
+                    next_person_id += 1
 
-                        # Save snapshot once per track ID
+                real_id = id_mapping[tid]
 
-                     snapshot_path = os.path.join(args.save_dir, f"person_{real_id}.jpg")
-                     if not os.path.exists(snapshot_path):
-                             crop = frame[y1:y2, x1:x2]
-                             if crop.size > 0:
-                                 cv2.imwrite(snapshot_path, crop)
+                # ✅ SAVE IMAGE ONLY ONCE WHEN PERSON IS STABLE
+                if real_id not in saved_images:
+                    if track_frames[tid] >= MIN_FRAMES:
+                        person_crop = frame[y1:y2, x1:x2]
 
-                        # Draw box and ID on frame
-                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                     cv2.putText(
-                             frame,
-                             f"ID:{real_id}",
-                             (x1, max(0, y1 - 10)),
-                             cv2.FONT_HERSHEY_SIMPLEX,
-                             0.7,
-                             (0, 255, 0),
-                             2,
-                         )
+                        # convert BGR → RGB (VERY IMPORTANT for face_recognition)
+                        cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
+
+                        if person_crop.size > 0:
+                            snapshot_path = os.path.join(args.save_dir, f"person_{real_id}.jpg")
+                            cv2.imwrite(snapshot_path, person_crop)
+                            saved_images.add(real_id)
+
+                # Count person once when stable
+                if real_id not in counted_ids:
+                    counted_ids.add(real_id)
+                    unique_ids.add(real_id)
+
+                    # Draw box and ID on frame
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(
+                        frame,
+                        f"ID:{real_id}",
+                        (x1, max(0, y1 - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 0),
+                        2,
+                    )
 
         # ── Clean up stale track IDs ──────────────────────────────────────────
         to_remove = []
@@ -268,7 +280,7 @@ def main():
 
         # ── Display every Nth frame to save time (inference still every frame) ─
         if frame_idx % args.display_every == 0:
-             cv2.imshow(window_name, frame)
+            cv2.imshow(window_name, frame)
 
         if writer is not None:
             writer.write(frame)
